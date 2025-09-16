@@ -5,39 +5,42 @@ import json
 import time
 import os
 
-try:
-    import pytesseract
-    
-    # Try different possible Tesseract paths
-    possible_paths = [
-        r"C:\Program Files\Tesseract-OCR\tesseract.exe",  # Windows default
-        r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",  # Windows 32-bit
-        "/usr/bin/tesseract",  # Linux/Unix
-        "/usr/local/bin/tesseract",  # macOS Homebrew
-        "tesseract",  # If it's in PATH
+# Configure Tesseract path with automatic detection
+import pytesseract
+
+# Search for tesseract binary in path
+@st.cache_resource
+def find_tesseract_binary() -> str:
+    """Find Tesseract binary in system PATH"""
+    return shutil.which("tesseract")
+
+# Set tesseract binary path
+tesseract_path = find_tesseract_binary()
+if tesseract_path:
+    pytesseract.pytesseract.tesseract_cmd = tesseract_path
+    st.success(f"✅ Tesseract found at: {tesseract_path}")
+else:
+    # Try common installation paths as fallback
+    common_paths = [
+        r"C:\Program Files\Tesseract-OCR\tesseract.exe",
+        r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
+        "/usr/bin/tesseract",
+        "/usr/local/bin/tesseract",
     ]
     
-    for path in possible_paths:
-        try:
+    for path in common_paths:
+        if os.path.exists(path):
             pytesseract.pytesseract.tesseract_cmd = path
-            # Test if it works
-            pytesseract.get_tesseract_version()
+            st.success(f"✅ Tesseract found at: {path}")
             break
-        except:
-            continue
     else:
-        st.error("Tesseract OCR not found. Please install Tesseract OCR.")
+        st.error("❌ Tesseract not found. Please install Tesseract OCR")
         st.info("""
         **Installation Instructions:**
-        - Windows: Download from https://github.com/UB-Mannheim/tesseract/wiki
-        - macOS: `brew install tesseract`
-        - Linux: `sudo apt-get install tesseract-ocr`
+        - **Windows**: Download from https://github.com/UB-Mannheim/tesseract/wiki
+        - **macOS**: `brew install tesseract`
+        - **Linux**: `sudo apt-get install tesseract-ocr`
         """)
-        
-except ImportError:
-    st.error("pytesseract not installed. Please install it with: pip install pytesseract")
-    
-
 # Download NLTK data for TextBlob if needed
 try:
     import nltk
@@ -227,6 +230,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
