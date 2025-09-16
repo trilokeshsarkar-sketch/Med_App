@@ -4,6 +4,7 @@ from datetime import datetime
 import json
 import time
 import os
+import shutil
 
 # Configure Tesseract path with automatic detection
 import pytesseract
@@ -230,6 +231,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
