@@ -5,9 +5,19 @@ import json
 import time
 import os
 
-# Configure Tesseract path (update this for your system)
-import pytesseract
-pytesseract.pytesseract.tesseract_cmd = r"tesseract.exe"
+# Try to configure Tesseract path automatically
+try:
+    import pytesseract
+    
+    # Try different possible Tesseract paths
+    possible_paths = [
+        r"C:\Program Files\Tesseract-OCR\tesseract.exe",  # Windows default
+        r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",  # Windows 32-bit
+        "/usr/bin/tesseract",  # Linux/Unix
+        "/usr/local/bin/tesseract",  # macOS Homebrew
+        "tesseract",  # If it's in PATH
+    ]
+    
 
 # Download NLTK data for TextBlob if needed
 try:
@@ -198,4 +208,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
