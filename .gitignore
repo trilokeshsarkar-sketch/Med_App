@@ -1,3 +1,6 @@
-*.txt
+# Ignore sensitive files
+key.txt
+*.env
+*.secret
 
-
+# Keep other txt files visible
