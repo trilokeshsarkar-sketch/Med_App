@@ -7,7 +7,7 @@ import os
 
 # Configure Tesseract path (update this for your system)
 import pytesseract
-pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+pytesseract.pytesseract.tesseract_cmd = r"tesseract.exe"
 
 # Download NLTK data for TextBlob if needed
 try:
@@ -198,3 +198,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
