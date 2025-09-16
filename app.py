@@ -5,7 +5,6 @@ import json
 import time
 import os
 
-# Try to configure Tesseract path automatically
 try:
     import pytesseract
     
@@ -17,6 +16,26 @@ try:
         "/usr/local/bin/tesseract",  # macOS Homebrew
         "tesseract",  # If it's in PATH
     ]
+    
+    for path in possible_paths:
+        try:
+            pytesseract.pytesseract.tesseract_cmd = path
+            # Test if it works
+            pytesseract.get_tesseract_version()
+            break
+        except:
+            continue
+    else:
+        st.error("Tesseract OCR not found. Please install Tesseract OCR.")
+        st.info("""
+        **Installation Instructions:**
+        - Windows: Download from https://github.com/UB-Mannheim/tesseract/wiki
+        - macOS: `brew install tesseract`
+        - Linux: `sudo apt-get install tesseract-ocr`
+        """)
+        
+except ImportError:
+    st.error("pytesseract not installed. Please install it with: pip install pytesseract")
     
 
 # Download NLTK data for TextBlob if needed
@@ -208,5 +227,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
