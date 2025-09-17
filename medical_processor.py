@@ -5,43 +5,57 @@ import time
 import re
 from datetime import datetime
 from PIL import Image
-import pytesseract
 import fitz  # PyMuPDF for PDF handling
 import io
 import tempfile
 from pathlib import Path
 import logging
+import torch
+import base64
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 class MedicalOCRProcessor:
-    def __init__(self):
+    def __init__(self, output_base_dir=None):
         # Initialize paths
         self.working_dir = Path.cwd()
-        self.images_folder = self.working_dir / "images"
-        self.pdf_folder = self.working_dir / "PDFs"
-        self.ocr_output_folder = self.working_dir / "ocr_texts"
-        self.medical_ocr_folder = self.working_dir / "Combined_txt"
-        self.output_directory = self.working_dir
+        
+        # Use custom output directory if provided, otherwise use working directory
+        if output_base_dir:
+            self.output_base_dir = Path(output_base_dir)
+        else:
+            self.output_base_dir = self.working_dir
+        
+        # Create specific folders within the output base directory
+        self.images_folder = self.output_base_dir / "images"
+        self.pdf_folder = self.output_base_dir / "PDFs"
+        self.ocr_output_folder = self.output_base_dir / "ocr_texts"
+        self.medical_ocr_folder = self.output_base_dir / "Combined_txt"
+        self.analysis_folder = self.output_base_dir / "analysis_results"
         
         # API settings
         self.api_url = "https://openrouter.ai/api/v1/chat/completions"
-        self.model = "deepseek/deepseek-chat-v3.1:free"
+        self.ocr_model = "nvidia/nemotron-nano-9b-v2:free"
+        self.analysis_model = "deepseek/deepseek-chat-v3.1:free"
         self.max_retries = 3
         self.base_delay = 2
+        
+        # OCR settings
+        self.use_nemotron = True  # Use NVIDIA Nemotron by default
+        self.openrouter_api_key = None
         
         # Create directories
         self.setup_directories()
     
     def setup_directories(self):
         """Create necessary directories if they don't exist"""
-        self.images_folder.mkdir(exist_ok=True)
-        self.pdf_folder.mkdir(exist_ok=True)
-        self.ocr_output_folder.mkdir(exist_ok=True)
-        self.medical_ocr_folder.mkdir(exist_ok=True)
-        self.output_directory.mkdir(exist_ok=True)
+        self.images_folder.mkdir(exist_ok=True, parents=True)
+        self.pdf_folder.mkdir(exist_ok=True, parents=True)
+        self.ocr_output_folder.mkdir(exist_ok=True, parents=True)
+        self.medical_ocr_folder.mkdir(exist_ok=True, parents=True)
+        self.analysis_folder.mkdir(exist_ok=True, parents=True)
     
     def clean_text(self, text):
         """Clean text by removing control characters and extra whitespace"""
@@ -50,6 +64,103 @@ class MedicalOCRProcessor:
         text = re.sub(r'[\x00-\x1F\x7F-\x9F]+', ' ', text)
         text = re.sub(r'\s+', ' ', text).strip()
         return text
+    
+    def image_to_base64(self, image):
+        """Convert PIL image to base64 string"""
+        try:
+            buffered = io.BytesIO()
+            image.save(buffered, format="PNG")
+            return base64.b64encode(buffered.getvalue()).decode('utf-8')
+        except Exception as e:
+            logger.error(f"Error converting image to base64: {e}")
+            return None
+    
+    def extract_text_with_nemotron(self, image, api_key):
+        """Extract text from image using NVIDIA Nemotron via OpenRouter"""
+        if not api_key:
+            return None, "No API key"
+        
+        try:
+            # Convert image to base64
+            image_base64 = self.image_to_base64(image)
+            if not image_base64:
+                return None, "Image conversion failed"
+            
+            # Prepare the prompt with image
+            prompt = {
+                "model": self.ocr_model,
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": "You are an expert OCR system. Extract all text from the provided image exactly as it appears. Preserve formatting, spacing, and special characters. Return only the extracted text without any additional commentary."
+                    },
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": "Extract all text from this medical document image. Be precise and accurate."
+                            },
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:image/png;base64,{image_base64}"
+                                }
+                            }
+                        ]
+                    }
+                ],
+                "max_tokens": 4000,
+                "temperature": 0.1
+            }
+            
+            # Send request to OpenRouter
+            response = requests.post(
+                self.api_url,
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+                json=prompt,
+                timeout=60
+            )
+            
+            response.raise_for_status()
+            result = response.json()
+            
+            extracted_text = result.get('choices', [{}])[0].get('message', {}).get('content', '')
+            return self.clean_text(extracted_text), "NVIDIA Nemotron"
+            
+        except Exception as e:
+            logger.error(f"NVIDIA Nemotron OCR error: {e}")
+            return None, f"NVIDIA Nemotron failed: {str(e)}"
+    
+    def extract_text_with_tesseract(self, image):
+        """Extract text from image using Tesseract (fallback)"""
+        try:
+            import pytesseract
+            text = pytesseract.image_to_string(image)
+            return self.clean_text(text), "Tesseract"
+        except ImportError:
+            logger.error("Tesseract not available")
+            return None, "Tesseract not installed"
+        except Exception as e:
+            logger.error(f"Tesseract error: {e}")
+            return None, f"Tesseract failed: {str(e)}"
+    
+    def extract_text_from_image(self, image, api_key=None):
+        """Extract text from image using available OCR method"""
+        if self.use_nemotron and api_key:
+            text, method = self.extract_text_with_nemotron(image, api_key)
+            if text:
+                return text, method
+        
+        # Fallback to Tesseract
+        text, method = self.extract_text_with_tesseract(image)
+        if text:
+            return text, method
+        
+        return "OCR failed - no text extracted", "Failed"
     
     def pdf_to_images(self, pdf_bytes):
         """Convert PDF bytes to a list of PIL images"""
@@ -64,7 +175,7 @@ class MedicalOCRProcessor:
             with fitz.open(temp_file_path) as pdf_document:
                 for page_num in range(len(pdf_document)):
                     page = pdf_document.load_page(page_num)
-                    mat = fitz.Matrix(2.0, 2.0)
+                    mat = fitz.Matrix(2.0, 2.0)  # Higher resolution for better OCR
                     pix = page.get_pixmap(matrix=mat)
                     img_data = pix.tobytes("ppm")
                     img = Image.open(io.BytesIO(img_data))
@@ -85,7 +196,7 @@ class MedicalOCRProcessor:
         
         return images
     
-    def process_single_file(self, uploaded_file):
+    def process_single_file(self, uploaded_file, api_key=None):
         """Process a single file and return results"""
         try:
             file_bytes = uploaded_file.read()
@@ -94,8 +205,7 @@ class MedicalOCRProcessor:
             
             if file_type.startswith('image/'):
                 image = Image.open(io.BytesIO(file_bytes))
-                ocr_text = pytesseract.image_to_string(image)
-                ocr_text = self.clean_text(ocr_text)
+                ocr_text, method = self.extract_text_from_image(image, api_key)
                 
                 txt_file_path = self.ocr_output_folder / f"{Path(file_name).stem}.txt"
                 with open(txt_file_path, "w", encoding="utf-8") as f:
@@ -106,7 +216,8 @@ class MedicalOCRProcessor:
                     "type": "Image",
                     "ocr_text": ocr_text,
                     "text_length": len(ocr_text),
-                    "status": "Success"
+                    "status": "Success",
+                    "method": method
                 }
                 
             elif file_type == 'application/pdf':
@@ -121,9 +232,11 @@ class MedicalOCRProcessor:
                     }
                 
                 pdf_ocr_text = ""
+                method_used = "Tesseract"  # Default
                 
                 for page_num, image in enumerate(pdf_images, 1):
-                    page_text = pytesseract.image_to_string(image)
+                    page_text, method = self.extract_text_from_image(image, api_key)
+                    method_used = method  # Track which method was used
                     pdf_ocr_text += f"--- Page {page_num} ---\n\n{page_text}\n\n"
                 
                 pdf_ocr_text = self.clean_text(pdf_ocr_text)
@@ -138,7 +251,8 @@ class MedicalOCRProcessor:
                     "ocr_text": pdf_ocr_text,
                     "text_length": len(pdf_ocr_text),
                     "page_count": len(pdf_images),
-                    "status": "Success"
+                    "status": "Success",
+                    "method": method_used
                 }
                 
             else:
@@ -168,7 +282,7 @@ class MedicalOCRProcessor:
             if progress_callback:
                 progress_callback(i + 1, len(uploaded_files))
             
-            result = self.process_single_file(uploaded_file)
+            result = self.process_single_file(uploaded_file, self.openrouter_api_key)
             processed_files_info.append(result)
             
             if result.get('status') == 'Success' and 'ocr_text' in result:
@@ -195,7 +309,7 @@ class MedicalOCRProcessor:
         for attempt in range(self.max_retries):
             try:
                 if progress_callback:
-                    progress_callback(1, 1, attempt + 1)  # Single request now
+                    progress_callback(1, 1, attempt + 1)
                 
                 response = requests.post(
                     url=self.api_url,
@@ -204,26 +318,18 @@ class MedicalOCRProcessor:
                         "Content-Type": "application/json",
                     },
                     json={
-                        "model": self.model,
+                        "model": self.analysis_model,
                         "messages": [
                             {
                                 "role": "system", 
-                                "content": """You are an experienced medical doctor and clinical analyst. Provide comprehensive, detailed medical analysis of the provided medical document.
-
-CRITICAL INSTRUCTIONS:
-1. Analyze the ENTIRE document thoroughly
-2. Provide structured, organized analysis with clear sections
-3. Focus on medical accuracy and clinical relevance
-4. Include specific findings, interpretations, and recommendations
-5. Use professional medical terminology
-6. Be comprehensive but avoid unnecessary repetition"""
+                                "content": """You are an experienced medical doctor and clinical analyst. Provide comprehensive, detailed medical analysis of the provided medical document."""
                             },
                             {"role": "user", "content": prompt}
                         ],
-                        "temperature": 0.1,  # Lower temperature for more factual responses
-                        "max_tokens": 4000,  # Increased tokens for detailed analysis
+                        "temperature": 0.1,
+                        "max_tokens": 4000,
                     },
-                    timeout=120  # Increased timeout for larger responses
+                    timeout=120
                 )
                 
                 if response.status_code == 429:
@@ -281,45 +387,14 @@ MEDICAL TEXT TO ANALYZE:
 REQUIRED ANALYSIS FORMAT:
 
 1. DOCUMENT OVERVIEW
-   - Type of document(s) (e.g., lab report, clinical notes, imaging report)
-   - Overall clinical context and purpose
-   - Date relevance and temporal considerations
-
 2. PATIENT DEMOGRAPHICS & HISTORY (if available)
-   - Age, gender, relevant background
-   - Medical history findings
-   - Current symptoms or complaints
-
 3. CLINICAL FINDINGS - DETAILED BREAKDOWN
-   For each major section (lab results, imaging, clinical notes):
-   - Normal/abnormal parameters with specific values
-   - Clinical significance of each finding
-   - Patterns and trends across multiple tests/measures
-   - Critical values requiring immediate attention
-
 4. DIFFERENTIAL DIAGNOSIS
-   - Potential conditions based on findings
-   - Most likely diagnoses with supporting evidence
-   - Ruled-out conditions with reasoning
-
 5. RISK ASSESSMENT
-   - Immediate health risks (urgent/emergent)
-   - Medium-term clinical concerns
-   - Long-term health implications
-
 6. RECOMMENDATIONS & NEXT STEPS
-   - Immediate actions required (if any)
-   - Specialist referrals needed
-   - Follow-up testing and timing
-   - Patient monitoring requirements
-   - Treatment considerations
-
 7. CLINICAL IMPRESSION & SUMMARY
-   - Overall assessment of patient status
-   - Key takeaways for healthcare providers
-   - Documentation quality assessment
 
-Please provide this analysis in a clear, structured format using medical terminology appropriate for healthcare professionals. Focus on actionable insights and clinical relevance."""
+Please provide this analysis in a clear, structured format using medical terminology appropriate for healthcare professionals."""
 
         result = self.send_to_api(prompt, api_key, progress_callback)
         
@@ -332,7 +407,7 @@ Please provide this analysis in a clear, structured format using medical termino
         """Save analysis results to files with error handling"""
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         
-        json_output_file = self.output_directory / f"medical_analysis_{timestamp}.json"
+        json_output_file = self.analysis_folder / f"medical_analysis_{timestamp}.json"
         result_data = {
             "timestamp": str(datetime.now()),
             "combined_text_path": combined_text_path,
@@ -345,7 +420,7 @@ Please provide this analysis in a clear, structured format using medical termino
         except Exception as e:
             return None, f"❌ Error saving JSON: {e}"
         
-        text_output_file = self.output_directory / f"medical_analysis_{timestamp}.txt"
+        text_output_file = self.analysis_folder / f"medical_analysis_{timestamp}.txt"
         try:
             with open(text_output_file, "w", encoding="utf-8") as f:
                 f.write(analysis_text)
