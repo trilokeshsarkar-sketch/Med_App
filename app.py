@@ -32,7 +32,7 @@ def load_default_api_key():
 def main():
     """Main Streamlit application"""
     st.set_page_config(
-        page_title="Medical OCR Analyzer",
+        page_title="Medical Document Analyzer",
         page_icon="🏥",
         layout="wide",
         initial_sidebar_state="expanded"
@@ -54,7 +54,7 @@ def main():
     </style>
     """, unsafe_allow_html=True)
     
-    st.markdown('<h1 class="main-header">🏥 Medical OCR Analyzer (NVIDIA Nemotron)</h1>', unsafe_allow_html=True)
+    st.markdown('<h1 class="main-header">🏥 Medical Document Analyzer (DeepSeek)</h1>', unsafe_allow_html=True)
     
     # Initialize processor
     if 'processor' not in st.session_state:
@@ -73,19 +73,19 @@ def main():
             help="Get your API key from https://openrouter.ai"
         )
         
-        st.header("⚙️ OCR Settings")
-        ocr_method = st.selectbox(
-            "OCR Method",
-            ["NVIDIA Nemotron (AI Vision)", "Tesseract (Fallback)"],
-            help="NVIDIA Nemotron uses advanced AI for OCR, Tesseract is traditional fallback"
+        st.header("⚙️ Processing Mode")
+        processing_mode = st.selectbox(
+            "Processing Method",
+            ["Direct DeepSeek Analysis", "OCR + Analysis (Fallback)"],
+            help="Direct analysis sends PDFs directly to DeepSeek. OCR mode extracts text first."
         )
         
         st.header("📋 Instructions")
         st.markdown("""
-        1. Select OCR method (NVIDIA Nemotron recommended)
-        2. Enter your OpenRouter API key
-        3. Upload medical documents
-        4. Click 'Process Documents'
+        1. Enter your OpenRouter API key
+        2. Upload medical documents (PDFs recommended)
+        3. Click 'Process Documents'
+        4. View analysis results
         """)
         
         # Hardware info
@@ -102,9 +102,9 @@ def main():
     
     uploaded_files = st.file_uploader(
         "Choose medical documents to analyze",
-        type=['png', 'jpg', 'jpeg', 'tiff', 'bmp', 'pdf'],
+        type=['pdf', 'png', 'jpg', 'jpeg', 'tiff', 'bmp'],
         accept_multiple_files=True,
-        help="Upload images or PDFs of medical documents"
+        help="PDF files are recommended for best results with direct DeepSeek analysis"
     )
     
     if uploaded_files:
@@ -120,9 +120,9 @@ def main():
             # Process files
             with st.spinner("Processing documents..."):
                 try:
-                    # Set OCR method in processor
-                    processor.use_nemotron = (ocr_method == "NVIDIA Nemotron (AI Vision)")
-                    processor.openrouter_api_key = api_key  # Pass API key for OCR
+                    # Set processing mode
+                    processor.direct_deepseek_mode = (processing_mode == "Direct DeepSeek Analysis")
+                    processor.openrouter_api_key = api_key
                     
                     data, all_ocr_text, combined_text_path, processed_files = processor.process_uploaded_files(
                         uploaded_files, progress_callback=update_file_progress
@@ -152,8 +152,8 @@ def main():
                     </div>
                     """, unsafe_allow_html=True)
             
-            # Show extracted text
-            if all_ocr_text:
+            # Show extracted text if in OCR mode
+            if all_ocr_text and processing_mode == "OCR + Analysis (Fallback)":
                 st.markdown('<div class="sub-header">📝 Full Extracted Text</div>', unsafe_allow_html=True)
                 
                 with st.expander("View Full Extracted Text", expanded=False):
@@ -213,7 +213,7 @@ def main():
                                     "processed_files": [f["filename"] for f in processed_files if f["status"] == "Success"],
                                     "text_length_original": len(all_ocr_text),
                                     "text_length_analyzed": len(text_for_analysis),
-                                    "ocr_method": ocr_method,
+                                    "processing_mode": processing_mode,
                                     "truncated": False
                                 }
                                 st.download_button(
@@ -225,6 +225,40 @@ def main():
                                 )
                 else:
                     st.warning("Please enter your OpenRouter API key to enable medical analysis.")
+            
+            # Show direct analysis results
+            elif processing_mode == "Direct DeepSeek Analysis":
+                st.markdown('<div class="sub-header">🔍 Direct DeepSeek Analysis Results</div>', unsafe_allow_html=True)
+                
+                for file_info in processed_files:
+                    if file_info.get('status') == 'Success' and file_info.get('direct_analysis'):
+                        st.markdown(f'<div class="sub-header">📄 {file_info["filename"]}</div>', unsafe_allow_html=True)
+                        st.markdown(f'<div class="analysis-display">{file_info["direct_analysis"]}</div>', unsafe_allow_html=True)
+                        
+                        # Download buttons for individual files
+                        col1, col2 = st.columns(2)
+                        with col1:
+                            st.download_button(
+                                label=f"📥 Download {file_info['filename']} Analysis (TXT)",
+                                data=file_info["direct_analysis"],
+                                file_name=f"{Path(file_info['filename']).stem}_analysis.txt",
+                                mime="text/plain",
+                                use_container_width=True
+                            )
+                        with col2:
+                            analysis_data = {
+                                "timestamp": str(datetime.now()),
+                                "filename": file_info["filename"],
+                                "analysis": file_info["direct_analysis"],
+                                "processing_mode": processing_mode
+                            }
+                            st.download_button(
+                                label=f"📥 Download {file_info['filename']} Analysis (JSON)",
+                                data=json.dumps(analysis_data, indent=2),
+                                file_name=f"{Path(file_info['filename']).stem}_analysis.json",
+                                mime="application/json",
+                                use_container_width=True
+                            )
     
     elif not uploaded_files:
         st.info("📋 Please upload medical documents to get started.")
