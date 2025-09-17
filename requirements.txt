@@ -1,6 +1,5 @@
 streamlit
 pillow
-pytesseract
 pymupdf
 requests
 python-dotenv
@@ -8,5 +7,3 @@ loguru
 python-multipart
 openai
 backoff
-tesseract
-easyocr
