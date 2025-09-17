@@ -5,56 +5,43 @@ import time
 import re
 from datetime import datetime
 from PIL import Image
+import pytesseract
 import fitz  # PyMuPDF for PDF handling
 import io
 import tempfile
 from pathlib import Path
 import logging
-import torch
-import base64
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 class MedicalOCRProcessor:
-    def __init__(self, output_base_dir=None):
+    def __init__(self):
         # Initialize paths
         self.working_dir = Path.cwd()
-        
-        # Use custom output directory if provided, otherwise use working directory
-        if output_base_dir:
-            self.output_base_dir = Path(output_base_dir)
-        else:
-            self.output_base_dir = self.working_dir
-        
-        # Create specific folders within the output base directory
-        self.images_folder = self.output_base_dir / "images"
-        self.pdf_folder = self.output_base_dir / "PDFs"
-        self.ocr_output_folder = self.output_base_dir / "ocr_texts"
-        self.medical_ocr_folder = self.output_base_dir / "Combined_txt"
-        self.analysis_folder = self.output_base_dir / "analysis_results"
+        self.images_folder = self.working_dir / "images"
+        self.pdf_folder = self.working_dir / "PDFs"
+        self.ocr_output_folder = self.working_dir / "ocr_texts"
+        self.medical_ocr_folder = self.working_dir / "Combined_txt"
+        self.output_directory = self.working_dir
         
         # API settings
         self.api_url = "https://openrouter.ai/api/v1/chat/completions"
-        self.analysis_model = "deepseek/deepseek-chat-v3.1:free"
+        self.model = "deepseek/deepseek-chat-v3.1:free"
         self.max_retries = 3
         self.base_delay = 2
-        
-        # Processing settings
-        self.direct_deepseek_mode = True  # Direct PDF to DeepSeek by default
-        self.openrouter_api_key = None
         
         # Create directories
         self.setup_directories()
     
     def setup_directories(self):
         """Create necessary directories if they don't exist"""
-        self.images_folder.mkdir(exist_ok=True, parents=True)
-        self.pdf_folder.mkdir(exist_ok=True, parents=True)
-        self.ocr_output_folder.mkdir(exist_ok=True, parents=True)
-        self.medical_ocr_folder.mkdir(exist_ok=True, parents=True)
-        self.analysis_folder.mkdir(exist_ok=True, parents=True)
+        self.images_folder.mkdir(exist_ok=True)
+        self.pdf_folder.mkdir(exist_ok=True)
+        self.ocr_output_folder.mkdir(exist_ok=True)
+        self.medical_ocr_folder.mkdir(exist_ok=True)
+        self.output_directory.mkdir(exist_ok=True)
     
     def clean_text(self, text):
         """Clean text by removing control characters and extra whitespace"""
@@ -64,149 +51,8 @@ class MedicalOCRProcessor:
         text = re.sub(r'\s+', ' ', text).strip()
         return text
     
-    def pdf_to_base64(self, pdf_bytes):
-        """Convert PDF bytes to base64 string"""
-        try:
-            return base64.b64encode(pdf_bytes).decode('utf-8')
-        except Exception as e:
-            logger.error(f"Error converting PDF to base64: {e}")
-            return None
-    
-    def image_to_base64(self, image):
-        """Convert PIL image to base64 string"""
-        try:
-            # Resize large images to avoid API limits
-            max_size = (1024, 1024)
-            if image.size[0] > max_size[0] or image.size[1] > max_size[1]:
-                image.thumbnail(max_size, Image.Resampling.LANCZOS)
-            
-            buffered = io.BytesIO()
-            image.save(buffered, format="PNG", optimize=True)
-            return base64.b64encode(buffered.getvalue()).decode('utf-8')
-        except Exception as e:
-            logger.error(f"Error converting image to base64: {e}")
-            return None
-    
-    def direct_deepseek_analysis(self, file_bytes, filename, file_type, api_key):
-        """Send file directly to DeepSeek for analysis"""
-        if not api_key:
-            return None, "No API key"
-        
-        for attempt in range(self.max_retries):
-            try:
-                # Prepare file content based on type
-                if file_type == 'application/pdf':
-                    file_base64 = self.pdf_to_base64(file_bytes)
-                    file_mime = "application/pdf"
-                elif file_type.startswith('image/'):
-                    image = Image.open(io.BytesIO(file_bytes))
-                    file_base64 = self.image_to_base64(image)
-                    file_mime = "image/png"
-                else:
-                    return None, "Unsupported file type for direct analysis"
-                
-                if not file_base64:
-                    return None, "File conversion failed"
-                
-                # Prepare the prompt for direct analysis
-                prompt = {
-                    "model": self.analysis_model,
-                    "messages": [
-                        {
-                            "role": "system",
-                            "content": """You are an expert medical doctor and clinical analyst. Analyze the provided medical document directly and provide comprehensive medical analysis.
-
-CRITICAL INSTRUCTIONS:
-1. Analyze the ENTIRE medical document thoroughly
-2. Provide structured, organized analysis with clear sections
-3. Focus on medical accuracy and clinical relevance
-4. Include specific findings, interpretations, and recommendations
-5. Use professional medical terminology
-6. Be comprehensive but avoid unnecessary repetition
-
-ANALYSIS FORMAT:
-1. DOCUMENT OVERVIEW
-2. PATIENT INFORMATION
-3. CLINICAL FINDINGS
-4. DIAGNOSIS & ASSESSMENT
-5. RECOMMENDATIONS
-6. SUMMARY"""
-                        },
-                        {
-                            "role": "user",
-                            "content": [
-                                {
-                                    "type": "text",
-                                    "text": f"Please provide a comprehensive medical analysis of this {file_type} document named '{filename}'. Analyze all medical content including lab results, clinical notes, imaging reports, and patient information."
-                                },
-                                {
-                                    "type": "file",
-                                    "file": {
-                                        "data": file_base64,
-                                        "mime_type": file_mime
-                                    }
-                                }
-                            ]
-                        }
-                    ],
-                    "max_tokens": 8000,
-                    "temperature": 0.1
-                }
-                
-                # Send request to OpenRouter
-                response = requests.post(
-                    self.api_url,
-                    headers={
-                        "Authorization": f"Bearer {api_key}",
-                        "Content-Type": "application/json",
-                    },
-                    json=prompt,
-                    timeout=180  # Longer timeout for file processing
-                )
-                
-                if response.status_code == 429:
-                    wait_time = self.exponential_backoff(attempt)
-                    time.sleep(wait_time)
-                    continue
-                
-                response.raise_for_status()
-                result = response.json()
-                
-                analysis_text = result.get('choices', [{}])[0].get('message', {}).get('content', '')
-                
-                if not analysis_text:
-                    return None, "Empty response from API"
-                
-                return self.clean_text(analysis_text), "Direct DeepSeek Analysis"
-                
-            except requests.exceptions.RequestException as e:
-                if attempt < self.max_retries - 1:
-                    wait_time = self.exponential_backoff(attempt)
-                    time.sleep(wait_time)
-                    continue
-                logger.error(f"Direct DeepSeek analysis API error: {e}")
-                return None, f"Direct analysis failed: {str(e)}"
-            except Exception as e:
-                logger.error(f"Direct DeepSeek analysis error: {e}")
-                return None, f"Direct analysis failed: {str(e)}"
-        
-        return None, "Direct analysis failed after multiple retries"
-    
-    def extract_text_with_tesseract(self, image):
-        """Extract text from image using Tesseract (fallback)"""
-        try:
-            import pytesseract
-            text = pytesseract.image_to_string(image)
-            return self.clean_text(text), "Tesseract"
-        except ImportError:
-            logger.error("Tesseract not available")
-            return None, "Tesseract not installed"
-        except Exception as e:
-            logger.error(f"Tesseract error: {e}")
-            return None, f"Tesseract failed: {str(e)}"
-    
-    def pdf_to_images(self, pdf_bytes, dpi=200):
-        """Convert PDF bytes to a list of high-quality PIL images"""
+    def pdf_to_images(self, pdf_bytes):
+        """Convert PDF bytes to a list of PIL images"""
         images = []
         temp_file_path = None
         
@@ -218,15 +64,14 @@ ANALYSIS FORMAT:
             with fitz.open(temp_file_path) as pdf_document:
                 for page_num in range(len(pdf_document)):
                     page = pdf_document.load_page(page_num)
-                    zoom = dpi / 72
-                    mat = fitz.Matrix(zoom, zoom)
+                    mat = fitz.Matrix(2.0, 2.0)
                     pix = page.get_pixmap(matrix=mat)
                     img_data = pix.tobytes("ppm")
                     img = Image.open(io.BytesIO(img_data))
                     
                     if img.mode != 'RGB':
                         img = img.convert('RGB')
-                    
+                        
                     images.append(img)
                     
         except Exception as e:
@@ -240,30 +85,17 @@ ANALYSIS FORMAT:
         
         return images
     
-    def process_single_file(self, uploaded_file, api_key=None):
+    def process_single_file(self, uploaded_file):
         """Process a single file and return results"""
         try:
             file_bytes = uploaded_file.read()
             file_type = uploaded_file.type
             file_name = uploaded_file.name
             
-            # Try direct DeepSeek analysis first if enabled
-            if self.direct_deepseek_mode and api_key:
-                analysis_text, method = self.direct_deepseek_analysis(file_bytes, file_name, file_type, api_key)
-                if analysis_text:
-                    return {
-                        "filename": file_name,
-                        "type": file_type,
-                        "direct_analysis": analysis_text,
-                        "text_length": len(analysis_text),
-                        "status": "Success",
-                        "method": method
-                    }
-            
-            # Fallback to OCR + analysis for images or if direct mode fails
             if file_type.startswith('image/'):
                 image = Image.open(io.BytesIO(file_bytes))
-                ocr_text, method = self.extract_text_with_tesseract(image)
+                ocr_text = pytesseract.image_to_string(image)
+                ocr_text = self.clean_text(ocr_text)
                 
                 txt_file_path = self.ocr_output_folder / f"{Path(file_name).stem}.txt"
                 with open(txt_file_path, "w", encoding="utf-8") as f:
@@ -274,8 +106,7 @@ ANALYSIS FORMAT:
                     "type": "Image",
                     "ocr_text": ocr_text,
                     "text_length": len(ocr_text),
-                    "status": "Success",
-                    "method": method
+                    "status": "Success"
                 }
                 
             elif file_type == 'application/pdf':
@@ -290,14 +121,10 @@ ANALYSIS FORMAT:
                     }
                 
                 pdf_ocr_text = ""
-                method_used = "Tesseract"
                 
                 for page_num, image in enumerate(pdf_images, 1):
-                    page_text, method = self.extract_text_with_tesseract(image)
-                    method_used = method
-                    
-                    if page_text and len(page_text.strip()) > 10:
-                        pdf_ocr_text += f"--- Page {page_num} ---\n\n{page_text}\n\n"
+                    page_text = pytesseract.image_to_string(image)
+                    pdf_ocr_text += f"--- Page {page_num} ---\n\n{page_text}\n\n"
                 
                 pdf_ocr_text = self.clean_text(pdf_ocr_text)
                 
@@ -311,8 +138,7 @@ ANALYSIS FORMAT:
                     "ocr_text": pdf_ocr_text,
                     "text_length": len(pdf_ocr_text),
                     "page_count": len(pdf_images),
-                    "status": "Success",
-                    "method": method_used
+                    "status": "Success"
                 }
                 
             else:
@@ -342,11 +168,10 @@ ANALYSIS FORMAT:
             if progress_callback:
                 progress_callback(i + 1, len(uploaded_files))
             
-            result = self.process_single_file(uploaded_file, self.openrouter_api_key)
+            result = self.process_single_file(uploaded_file)
             processed_files_info.append(result)
             
-            # For OCR mode, collect text for combined analysis
-            if not self.direct_deepseek_mode and result.get('status') == 'Success' and 'ocr_text' in result:
+            if result.get('status') == 'Success' and 'ocr_text' in result:
                 all_ocr_text += f"--- {result['filename']} ---\n\n{result['ocr_text']}\n\n"
                 file_data.append(result)
         
@@ -370,7 +195,7 @@ ANALYSIS FORMAT:
         for attempt in range(self.max_retries):
             try:
                 if progress_callback:
-                    progress_callback(1, 1, attempt + 1)
+                    progress_callback(1, 1, attempt + 1)  # Single request now
                 
                 response = requests.post(
                     url=self.api_url,
@@ -379,18 +204,26 @@ ANALYSIS FORMAT:
                         "Content-Type": "application/json",
                     },
                     json={
-                        "model": self.analysis_model,
+                        "model": self.model,
                         "messages": [
                             {
                                 "role": "system", 
-                                "content": """You are an experienced medical doctor and clinical analyst. Provide comprehensive, detailed medical analysis of the provided medical document."""
+                                "content": """You are an experienced medical doctor and clinical analyst. Provide comprehensive, detailed medical analysis of the provided medical document.
+
+CRITICAL INSTRUCTIONS:
+1. Analyze the ENTIRE document thoroughly
+2. Provide structured, organized analysis with clear sections
+3. Focus on medical accuracy and clinical relevance
+4. Include specific findings, interpretations, and recommendations
+5. Use professional medical terminology
+6. Be comprehensive but avoid unnecessary repetition"""
                             },
                             {"role": "user", "content": prompt}
                         ],
-                        "temperature": 0.1,
-                        "max_tokens": 4000,
+                        "temperature": 0.1,  # Lower temperature for more factual responses
+                        "max_tokens": 4000,  # Increased tokens for detailed analysis
                     },
-                    timeout=120
+                    timeout=120  # Increased timeout for larger responses
                 )
                 
                 if response.status_code == 429:
@@ -448,13 +281,45 @@ MEDICAL TEXT TO ANALYZE:
 REQUIRED ANALYSIS FORMAT:
 
 1. DOCUMENT OVERVIEW
-2. PATIENT INFORMATION
-3. CLINICAL FINDINGS
-4. DIAGNOSIS & ASSESSMENT
-5. RECOMMENDATIONS
-6. SUMMARY
+   - Type of document(s) (e.g., lab report, clinical notes, imaging report)
+   - Overall clinical context and purpose
+   - Date relevance and temporal considerations
 
-Please provide this analysis in a clear, structured format using medical terminology appropriate for healthcare professionals."""
+2. PATIENT DEMOGRAPHICS & HISTORY (if available)
+   - Age, gender, relevant background
+   - Medical history findings
+   - Current symptoms or complaints
+
+3. CLINICAL FINDINGS - DETAILED BREAKDOWN
+   For each major section (lab results, imaging, clinical notes):
+   - Normal/abnormal parameters with specific values
+   - Clinical significance of each finding
+   - Patterns and trends across multiple tests/measures
+   - Critical values requiring immediate attention
+
+4. DIFFERENTIAL DIAGNOSIS
+   - Potential conditions based on findings
+   - Most likely diagnoses with supporting evidence
+   - Ruled-out conditions with reasoning
+
+5. RISK ASSESSMENT
+   - Immediate health risks (urgent/emergent)
+   - Medium-term clinical concerns
+   - Long-term health implications
+
+6. RECOMMENDATIONS & NEXT STEPS
+   - Immediate actions required (if any)
+   - Specialist referrals needed
+   - Follow-up testing and timing
+   - Patient monitoring requirements
+   - Treatment considerations
+
+7. CLINICAL IMPRESSION & SUMMARY
+   - Overall assessment of patient status
+   - Key takeaways for healthcare providers
+   - Documentation quality assessment
+
+Please provide this analysis in a clear, structured format using medical terminology appropriate for healthcare professionals. Focus on actionable insights and clinical relevance."""
 
         result = self.send_to_api(prompt, api_key, progress_callback)
         
@@ -467,7 +332,7 @@ Please provide this analysis in a clear, structured format using medical termino
         """Save analysis results to files with error handling"""
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         
-        json_output_file = self.analysis_folder / f"medical_analysis_{timestamp}.json"
+        json_output_file = self.output_directory / f"medical_analysis_{timestamp}.json"
         result_data = {
             "timestamp": str(datetime.now()),
             "combined_text_path": combined_text_path,
@@ -480,7 +345,7 @@ Please provide this analysis in a clear, structured format using medical termino
         except Exception as e:
             return None, f"❌ Error saving JSON: {e}"
         
-        text_output_file = self.analysis_folder / f"medical_analysis_{timestamp}.txt"
+        text_output_file = self.output_directory / f"medical_analysis_{timestamp}.txt"
         try:
             with open(text_output_file, "w", encoding="utf-8") as f:
                 f.write(analysis_text)
