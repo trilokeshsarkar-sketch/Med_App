@@ -5,9 +5,7 @@ import json
 import time
 import os
 
-# ✅ Removed Tesseract import & path config
-# import pytesseract
-# pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+# ✅ No need for Tesseract anymore (using EasyOCR inside MedicalOCRProcessor)
 
 # Download NLTK data for TextBlob if needed
 try:
@@ -66,14 +64,19 @@ def main():
             "OpenRouter API Key",
             type="password",
             value=default_api_key,
-            help="Get your API key from https://openrouter.ai"
+            help="If key.txt is found, it's auto-loaded. You can override it here."
         )
+        
+        if api_key:
+            st.success("✅ API key loaded")
+        else:
+            st.warning("⚠️ No API key found. Please add `key.txt` or enter manually.")
         
         st.header("📋 Instructions")
         st.markdown("""
-        1. Enter your OpenRouter API key (or auto-loaded from `key.txt`)
-        2. Upload medical documents
-        3. Click 'Process Documents'
+        1. API key auto-loads from `key.txt` (or enter manually)  
+        2. Upload medical documents  
+        3. Click **Process Documents**  
         """)
     
     # File upload
@@ -134,11 +137,11 @@ def main():
                         mime="text/plain"
                     )
                 
-                # Analyze text if API key is provided
+                # Analyze text if API key is available
                 if api_key:
                     st.markdown('<div class="sub-header">🔍 Medical Analysis</div>', unsafe_allow_html=True)
                     
-                    text_for_analysis = all_ocr_text  # No truncation
+                    text_for_analysis = all_ocr_text
                     
                     # Setup analysis progress
                     analysis_progress = st.progress(0)
