@@ -37,13 +37,12 @@ class MedicalOCRProcessor:
         
         # API settings
         self.api_url = "https://openrouter.ai/api/v1/chat/completions"
-        self.ocr_model = "nvidia/nemotron-nano-9b-v2:free"
         self.analysis_model = "deepseek/deepseek-chat-v3.1:free"
         self.max_retries = 3
         self.base_delay = 2
         
-        # OCR settings
-        self.use_nemotron = True  # Use NVIDIA Nemotron by default
+        # Processing settings
+        self.direct_deepseek_mode = True  # Direct PDF to DeepSeek by default
         self.openrouter_api_key = None
         
         # Create directories
@@ -65,6 +64,14 @@ class MedicalOCRProcessor:
         text = re.sub(r'\s+', ' ', text).strip()
         return text
     
+    def pdf_to_base64(self, pdf_bytes):
+        """Convert PDF bytes to base64 string"""
+        try:
+            return base64.b64encode(pdf_bytes).decode('utf-8')
+        except Exception as e:
+            logger.error(f"Error converting PDF to base64: {e}")
+            return None
+    
     def image_to_base64(self, image):
         """Convert PIL image to base64 string"""
         try:
@@ -80,43 +87,69 @@ class MedicalOCRProcessor:
             logger.error(f"Error converting image to base64: {e}")
             return None
     
-    def extract_text_with_nemotron(self, image, api_key):
-        """Extract text from image using NVIDIA Nemotron via OpenRouter"""
+    def direct_deepseek_analysis(self, file_bytes, filename, file_type, api_key):
+        """Send file directly to DeepSeek for analysis"""
         if not api_key:
             return None, "No API key"
         
         for attempt in range(self.max_retries):
             try:
-                # Convert image to base64
-                image_base64 = self.image_to_base64(image)
-                if not image_base64:
-                    return None, "Image conversion failed"
+                # Prepare file content based on type
+                if file_type == 'application/pdf':
+                    file_base64 = self.pdf_to_base64(file_bytes)
+                    file_mime = "application/pdf"
+                elif file_type.startswith('image/'):
+                    image = Image.open(io.BytesIO(file_bytes))
+                    file_base64 = self.image_to_base64(image)
+                    file_mime = "image/png"
+                else:
+                    return None, "Unsupported file type for direct analysis"
                 
-                # Prepare the prompt with image
+                if not file_base64:
+                    return None, "File conversion failed"
+                
+                # Prepare the prompt for direct analysis
                 prompt = {
-                    "model": self.ocr_model,
+                    "model": self.analysis_model,
                     "messages": [
                         {
                             "role": "system",
-                            "content": "You are an expert OCR system specialized in medical documents. Extract all text from the provided image exactly as it appears. Preserve formatting, spacing, and special characters. Return only the extracted text without any additional commentary. Be very accurate with medical terminology, numbers, and measurements."
+                            "content": """You are an expert medical doctor and clinical analyst. Analyze the provided medical document directly and provide comprehensive medical analysis.
+
+CRITICAL INSTRUCTIONS:
+1. Analyze the ENTIRE medical document thoroughly
+2. Provide structured, organized analysis with clear sections
+3. Focus on medical accuracy and clinical relevance
+4. Include specific findings, interpretations, and recommendations
+5. Use professional medical terminology
+6. Be comprehensive but avoid unnecessary repetition
+
+ANALYSIS FORMAT:
+1. DOCUMENT OVERVIEW
+2. PATIENT INFORMATION
+3. CLINICAL FINDINGS
+4. DIAGNOSIS & ASSESSMENT
+5. RECOMMENDATIONS
+6. SUMMARY"""
                         },
                         {
                             "role": "user",
                             "content": [
                                 {
                                     "type": "text",
-                                    "text": "Extract all text from this medical document image with high precision. Pay special attention to medical terms, numbers, dates, and measurements."
+                                    "text": f"Please provide a comprehensive medical analysis of this {file_type} document named '{filename}'. Analyze all medical content including lab results, clinical notes, imaging reports, and patient information."
                                 },
                                 {
-                                    "type": "image_url",
-                                    "image_url": {
-                                        "url": f"data:image/png;base64,{image_base64}"
+                                    "type": "file",
+                                    "file": {
+                                        "data": file_base64,
+                                        "mime_type": file_mime
                                     }
                                 }
                             ]
                         }
                     ],
-                    "max_tokens": 4000,
+                    "max_tokens": 8000,
                     "temperature": 0.1
                 }
                 
@@ -128,7 +161,7 @@ class MedicalOCRProcessor:
                         "Content-Type": "application/json",
                     },
                     json=prompt,
-                    timeout=90  # Increased timeout for image processing
+                    timeout=180  # Longer timeout for file processing
                 )
                 
                 if response.status_code == 429:
@@ -139,21 +172,25 @@ class MedicalOCRProcessor:
                 response.raise_for_status()
                 result = response.json()
                 
-                extracted_text = result.get('choices', [{}])[0].get('message', {}).get('content', '')
-                return self.clean_text(extracted_text), "NVIDIA Nemotron"
+                analysis_text = result.get('choices', [{}])[0].get('message', {}).get('content', '')
+                
+                if not analysis_text:
+                    return None, "Empty response from API"
+                
+                return self.clean_text(analysis_text), "Direct DeepSeek Analysis"
                 
             except requests.exceptions.RequestException as e:
                 if attempt < self.max_retries - 1:
                     wait_time = self.exponential_backoff(attempt)
                     time.sleep(wait_time)
                     continue
-                logger.error(f"NVIDIA Nemotron OCR API error: {e}")
-                return None, f"NVIDIA Nemotron failed: {str(e)}"
+                logger.error(f"Direct DeepSeek analysis API error: {e}")
+                return None, f"Direct analysis failed: {str(e)}"
             except Exception as e:
-                logger.error(f"NVIDIA Nemotron OCR error: {e}")
-                return None, f"NVIDIA Nemotron failed: {str(e)}"
+                logger.error(f"Direct DeepSeek analysis error: {e}")
+                return None, f"Direct analysis failed: {str(e)}"
         
-        return None, "NVIDIA Nemotron failed after multiple retries"
+        return None, "Direct analysis failed after multiple retries"
     
     def extract_text_with_tesseract(self, image):
         """Extract text from image using Tesseract (fallback)"""
@@ -168,59 +205,33 @@ class MedicalOCRProcessor:
             logger.error(f"Tesseract error: {e}")
             return None, f"Tesseract failed: {str(e)}"
     
-    def extract_text_from_image(self, image, api_key=None):
-        """Extract text from image using available OCR method"""
-        if self.use_nemotron and api_key:
-            text, method = self.extract_text_with_nemotron(image, api_key)
-            if text and len(text.strip()) > 10:  # Minimum text length check
-                return text, method
-        
-        # Fallback to Tesseract
-        text, method = self.extract_text_with_tesseract(image)
-        if text:
-            return text, method
-        
-        return "OCR failed - no text extracted", "Failed"
-    
     def pdf_to_images(self, pdf_bytes, dpi=200):
         """Convert PDF bytes to a list of high-quality PIL images"""
         images = []
         temp_file_path = None
         
         try:
-            # Save PDF to temporary file
             with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp_file:
                 tmp_file.write(pdf_bytes)
                 temp_file_path = tmp_file.name
             
-            # Open PDF and convert each page to image
             with fitz.open(temp_file_path) as pdf_document:
                 for page_num in range(len(pdf_document)):
                     page = pdf_document.load_page(page_num)
-                    
-                    # Create high-resolution matrix for better OCR
-                    zoom = dpi / 72  # 72 is the default DPI in PDF
+                    zoom = dpi / 72
                     mat = fitz.Matrix(zoom, zoom)
-                    
-                    # Render page to pixmap
                     pix = page.get_pixmap(matrix=mat)
-                    
-                    # Convert to PIL Image
                     img_data = pix.tobytes("ppm")
                     img = Image.open(io.BytesIO(img_data))
                     
                     if img.mode != 'RGB':
                         img = img.convert('RGB')
                     
-                    # Enhance image for better OCR
-                    img = self.enhance_image_for_ocr(img)
-                    
                     images.append(img)
                     
         except Exception as e:
             logger.error(f"Error converting PDF to images: {e}")
         finally:
-            # Clean up temporary file
             if temp_file_path and os.path.exists(temp_file_path):
                 try:
                     os.unlink(temp_file_path)
@@ -229,26 +240,6 @@ class MedicalOCRProcessor:
         
         return images
     
-    def enhance_image_for_ocr(self, image):
-        """Enhance image for better OCR results"""
-        try:
-            # Convert to grayscale for better contrast
-            if image.mode != 'L':
-                image = image.convert('L')
-            
-            # Enhance contrast
-            from PIL import ImageEnhance
-            enhancer = ImageEnhance.Contrast(image)
-            image = enhancer.enhance(1.5)  # Increase contrast
-            
-            enhancer = ImageEnhance.Sharpness(image)
-            image = enhancer.enhance(1.2)  # Increase sharpness
-            
-        except Exception as e:
-            logger.warning(f"Image enhancement failed: {e}")
-        
-        return image
-    
     def process_single_file(self, uploaded_file, api_key=None):
         """Process a single file and return results"""
         try:
@@ -256,12 +247,23 @@ class MedicalOCRProcessor:
             file_type = uploaded_file.type
             file_name = uploaded_file.name
             
+            # Try direct DeepSeek analysis first if enabled
+            if self.direct_deepseek_mode and api_key:
+                analysis_text, method = self.direct_deepseek_analysis(file_bytes, file_name, file_type, api_key)
+                if analysis_text:
+                    return {
+                        "filename": file_name,
+                        "type": file_type,
+                        "direct_analysis": analysis_text,
+                        "text_length": len(analysis_text),
+                        "status": "Success",
+                        "method": method
+                    }
+            
+            # Fallback to OCR + analysis for images or if direct mode fails
             if file_type.startswith('image/'):
-                # Process image file
                 image = Image.open(io.BytesIO(file_bytes))
-                # Enhance image for better OCR
-                image = self.enhance_image_for_ocr(image)
-                ocr_text, method = self.extract_text_from_image(image, api_key)
+                ocr_text, method = self.extract_text_with_tesseract(image)
                 
                 txt_file_path = self.ocr_output_folder / f"{Path(file_name).stem}.txt"
                 with open(txt_file_path, "w", encoding="utf-8") as f:
@@ -277,7 +279,6 @@ class MedicalOCRProcessor:
                 }
                 
             elif file_type == 'application/pdf':
-                # Process PDF file - convert to images first
                 pdf_images = self.pdf_to_images(file_bytes)
                 
                 if not pdf_images:
@@ -289,18 +290,14 @@ class MedicalOCRProcessor:
                     }
                 
                 pdf_ocr_text = ""
-                method_used = "Tesseract"  # Default
-                successful_pages = 0
+                method_used = "Tesseract"
                 
                 for page_num, image in enumerate(pdf_images, 1):
-                    page_text, method = self.extract_text_from_image(image, api_key)
-                    method_used = method  # Track which method was used
+                    page_text, method = self.extract_text_with_tesseract(image)
+                    method_used = method
                     
-                    if page_text and len(page_text.strip()) > 10:  # Valid text check
+                    if page_text and len(page_text.strip()) > 10:
                         pdf_ocr_text += f"--- Page {page_num} ---\n\n{page_text}\n\n"
-                        successful_pages += 1
-                    else:
-                        pdf_ocr_text += f"--- Page {page_num} ---\n\n[OCR failed or no text detected]\n\n"
                 
                 pdf_ocr_text = self.clean_text(pdf_ocr_text)
                 
@@ -314,7 +311,6 @@ class MedicalOCRProcessor:
                     "ocr_text": pdf_ocr_text,
                     "text_length": len(pdf_ocr_text),
                     "page_count": len(pdf_images),
-                    "successful_pages": successful_pages,
                     "status": "Success",
                     "method": method_used
                 }
@@ -349,7 +345,8 @@ class MedicalOCRProcessor:
             result = self.process_single_file(uploaded_file, self.openrouter_api_key)
             processed_files_info.append(result)
             
-            if result.get('status') == 'Success' and 'ocr_text' in result:
+            # For OCR mode, collect text for combined analysis
+            if not self.direct_deepseek_mode and result.get('status') == 'Success' and 'ocr_text' in result:
                 all_ocr_text += f"--- {result['filename']} ---\n\n{result['ocr_text']}\n\n"
                 file_data.append(result)
         
@@ -386,15 +383,7 @@ class MedicalOCRProcessor:
                         "messages": [
                             {
                                 "role": "system", 
-                                "content": """You are an experienced medical doctor and clinical analyst. Provide comprehensive, detailed medical analysis of the provided medical document.
-
-CRITICAL INSTRUCTIONS:
-1. Analyze the ENTIRE document thoroughly
-2. Provide structured, organized analysis with clear sections
-3. Focus on medical accuracy and clinical relevance
-4. Include specific findings, interpretations, and recommendations
-5. Use professional medical terminology
-6. Be comprehensive but avoid unnecessary repetition"""
+                                "content": """You are an experienced medical doctor and clinical analyst. Provide comprehensive, detailed medical analysis of the provided medical document."""
                             },
                             {"role": "user", "content": prompt}
                         ],
@@ -459,45 +448,13 @@ MEDICAL TEXT TO ANALYZE:
 REQUIRED ANALYSIS FORMAT:
 
 1. DOCUMENT OVERVIEW
-   - Type of document(s) (e.g., lab report, clinical notes, imaging report)
-   - Overall clinical context and purpose
-   - Date relevance and temporal considerations
+2. PATIENT INFORMATION
+3. CLINICAL FINDINGS
+4. DIAGNOSIS & ASSESSMENT
+5. RECOMMENDATIONS
+6. SUMMARY
 
-2. PATIENT DEMOGRAPHICS & HISTORY (if available)
-   - Age, gender, relevant background
-   - Medical history findings
-   - Current symptoms or complaints
-
-3. CLINICAL FINDINGS - DETAILED BREAKDOWN
-   For each major section (lab results, imaging, clinical notes):
-   - Normal/abnormal parameters with specific values
-   - Clinical significance of each finding
-   - Patterns and trends across multiple tests/measures
-   - Critical values requiring immediate attention
-
-4. DIFFERENTIAL DIAGNOSIS
-   - Potential conditions based on findings
-   - Most likely diagnoses with supporting evidence
-   - Ruled-out conditions with reasoning
-
-5. RISK ASSESSMENT
-   - Immediate health risks (urgent/emergent)
-   - Medium-term clinical concerns
-   - Long-term health implications
-
-6. RECOMMENDATIONS & NEXT STEPS
-   - Immediate actions required (if any)
-   - Specialist referrals needed
-   - Follow-up testing and timing
-   - Patient monitoring requirements
-   - Treatment considerations
-
-7. CLINICAL IMPRESSION & SUMMARY
-   - Overall assessment of patient status
-   - Key takeaways for healthcare providers
-   - Documentation quality assessment
-
-Please provide this analysis in a clear, structured format using medical terminology appropriate for healthcare professionals. Focus on actionable insights and clinical relevance."""
+Please provide this analysis in a clear, structured format using medical terminology appropriate for healthcare professionals."""
 
         result = self.send_to_api(prompt, api_key, progress_callback)
         
