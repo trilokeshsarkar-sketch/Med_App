@@ -11,6 +11,6 @@ backoff
 tesseract
 transformers 
 torch
-
+pytorch
 
 
