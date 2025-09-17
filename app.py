@@ -35,7 +35,7 @@ def image_to_base64(image):
 
 
 def ocr_via_openrouter(images, api_key, progress_callback=None):
-    """Send images to OpenRouter model for OCR"""
+    """Send images to OpenRouter Claude Opus for OCR"""
     url = "https://openrouter.ai/api/v1/chat/completions"
     headers = {
         "Authorization": f"Bearer {api_key}",
@@ -52,7 +52,7 @@ def ocr_via_openrouter(images, api_key, progress_callback=None):
 
         img_b64 = image_to_base64(img)
         payload = {
-            "model": "gpt-4.1-mini",  # ✅ free-tier OCR-capable model
+            "model": "anthropic/claude-opus-4.1",  # ✅ Claude Opus model
             "messages": [
                 {"role": "system", "content": "You are an OCR assistant. Extract all text exactly as seen in the image."},
                 {"role": "user", "content": [
