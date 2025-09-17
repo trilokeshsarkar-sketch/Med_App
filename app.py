@@ -5,9 +5,9 @@ import json
 import time
 import os
 
-# Configure Tesseract path (update this for your system)
-import pytesseract
-pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+# ✅ Removed Tesseract import & path config
+# import pytesseract
+# pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
 
 # Download NLTK data for TextBlob if needed
 try:
@@ -52,7 +52,7 @@ def main():
     
     st.markdown('<h1 class="main-header">🏥 Medical OCR Analyzer</h1>', unsafe_allow_html=True)
     
-    # Initialize processor
+    # Initialize processor (with EasyOCR)
     if 'processor' not in st.session_state:
         st.session_state.processor = MedicalOCRProcessor()
     
