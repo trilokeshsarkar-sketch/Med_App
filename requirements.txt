@@ -1,5 +1,4 @@
 streamlit
-pillow
 pytesseract
 pymupdf
 requests
@@ -12,5 +11,6 @@ tesseract
 transformers 
 torch
 pytorch
+
 
 
