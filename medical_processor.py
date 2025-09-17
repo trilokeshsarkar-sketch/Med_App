@@ -68,8 +68,13 @@ class MedicalOCRProcessor:
     def image_to_base64(self, image):
         """Convert PIL image to base64 string"""
         try:
+            # Resize large images to avoid API limits
+            max_size = (1024, 1024)
+            if image.size[0] > max_size[0] or image.size[1] > max_size[1]:
+                image.thumbnail(max_size, Image.Resampling.LANCZOS)
+            
             buffered = io.BytesIO()
-            image.save(buffered, format="PNG")
+            image.save(buffered, format="PNG", optimize=True)
             return base64.b64encode(buffered.getvalue()).decode('utf-8')
         except Exception as e:
             logger.error(f"Error converting image to base64: {e}")
@@ -80,60 +85,75 @@ class MedicalOCRProcessor:
         if not api_key:
             return None, "No API key"
         
-        try:
-            # Convert image to base64
-            image_base64 = self.image_to_base64(image)
-            if not image_base64:
-                return None, "Image conversion failed"
-            
-            # Prepare the prompt with image
-            prompt = {
-                "model": self.ocr_model,
-                "messages": [
-                    {
-                        "role": "system",
-                        "content": "You are an expert OCR system. Extract all text from the provided image exactly as it appears. Preserve formatting, spacing, and special characters. Return only the extracted text without any additional commentary."
-                    },
-                    {
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "text",
-                                "text": "Extract all text from this medical document image. Be precise and accurate."
-                            },
-                            {
-                                "type": "image_url",
-                                "image_url": {
-                                    "url": f"data:image/png;base64,{image_base64}"
+        for attempt in range(self.max_retries):
+            try:
+                # Convert image to base64
+                image_base64 = self.image_to_base64(image)
+                if not image_base64:
+                    return None, "Image conversion failed"
+                
+                # Prepare the prompt with image
+                prompt = {
+                    "model": self.ocr_model,
+                    "messages": [
+                        {
+                            "role": "system",
+                            "content": "You are an expert OCR system specialized in medical documents. Extract all text from the provided image exactly as it appears. Preserve formatting, spacing, and special characters. Return only the extracted text without any additional commentary. Be very accurate with medical terminology, numbers, and measurements."
+                        },
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "text",
+                                    "text": "Extract all text from this medical document image with high precision. Pay special attention to medical terms, numbers, dates, and measurements."
+                                },
+                                {
+                                    "type": "image_url",
+                                    "image_url": {
+                                        "url": f"data:image/png;base64,{image_base64}"
+                                    }
                                 }
-                            }
-                        ]
-                    }
-                ],
-                "max_tokens": 4000,
-                "temperature": 0.1
-            }
-            
-            # Send request to OpenRouter
-            response = requests.post(
-                self.api_url,
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json",
-                },
-                json=prompt,
-                timeout=60
-            )
-            
-            response.raise_for_status()
-            result = response.json()
-            
-            extracted_text = result.get('choices', [{}])[0].get('message', {}).get('content', '')
-            return self.clean_text(extracted_text), "NVIDIA Nemotron"
-            
-        except Exception as e:
-            logger.error(f"NVIDIA Nemotron OCR error: {e}")
-            return None, f"NVIDIA Nemotron failed: {str(e)}"
+                            ]
+                        }
+                    ],
+                    "max_tokens": 4000,
+                    "temperature": 0.1
+                }
+                
+                # Send request to OpenRouter
+                response = requests.post(
+                    self.api_url,
+                    headers={
+                        "Authorization": f"Bearer {api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json=prompt,
+                    timeout=90  # Increased timeout for image processing
+                )
+                
+                if response.status_code == 429:
+                    wait_time = self.exponential_backoff(attempt)
+                    time.sleep(wait_time)
+                    continue
+                
+                response.raise_for_status()
+                result = response.json()
+                
+                extracted_text = result.get('choices', [{}])[0].get('message', {}).get('content', '')
+                return self.clean_text(extracted_text), "NVIDIA Nemotron"
+                
+            except requests.exceptions.RequestException as e:
+                if attempt < self.max_retries - 1:
+                    wait_time = self.exponential_backoff(attempt)
+                    time.sleep(wait_time)
+                    continue
+                logger.error(f"NVIDIA Nemotron OCR API error: {e}")
+                return None, f"NVIDIA Nemotron failed: {str(e)}"
+            except Exception as e:
+                logger.error(f"NVIDIA Nemotron OCR error: {e}")
+                return None, f"NVIDIA Nemotron failed: {str(e)}"
+        
+        return None, "NVIDIA Nemotron failed after multiple retries"
     
     def extract_text_with_tesseract(self, image):
         """Extract text from image using Tesseract (fallback)"""
@@ -152,7 +172,7 @@ class MedicalOCRProcessor:
         """Extract text from image using available OCR method"""
         if self.use_nemotron and api_key:
             text, method = self.extract_text_with_nemotron(image, api_key)
-            if text:
+            if text and len(text.strip()) > 10:  # Minimum text length check
                 return text, method
         
         # Fallback to Tesseract
@@ -162,32 +182,45 @@ class MedicalOCRProcessor:
         
         return "OCR failed - no text extracted", "Failed"
     
-    def pdf_to_images(self, pdf_bytes):
-        """Convert PDF bytes to a list of PIL images"""
+    def pdf_to_images(self, pdf_bytes, dpi=200):
+        """Convert PDF bytes to a list of high-quality PIL images"""
         images = []
         temp_file_path = None
         
         try:
+            # Save PDF to temporary file
             with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp_file:
                 tmp_file.write(pdf_bytes)
                 temp_file_path = tmp_file.name
             
+            # Open PDF and convert each page to image
             with fitz.open(temp_file_path) as pdf_document:
                 for page_num in range(len(pdf_document)):
                     page = pdf_document.load_page(page_num)
-                    mat = fitz.Matrix(2.0, 2.0)  # Higher resolution for better OCR
+                    
+                    # Create high-resolution matrix for better OCR
+                    zoom = dpi / 72  # 72 is the default DPI in PDF
+                    mat = fitz.Matrix(zoom, zoom)
+                    
+                    # Render page to pixmap
                     pix = page.get_pixmap(matrix=mat)
+                    
+                    # Convert to PIL Image
                     img_data = pix.tobytes("ppm")
                     img = Image.open(io.BytesIO(img_data))
                     
                     if img.mode != 'RGB':
                         img = img.convert('RGB')
-                        
+                    
+                    # Enhance image for better OCR
+                    img = self.enhance_image_for_ocr(img)
+                    
                     images.append(img)
                     
         except Exception as e:
             logger.error(f"Error converting PDF to images: {e}")
         finally:
+            # Clean up temporary file
             if temp_file_path and os.path.exists(temp_file_path):
                 try:
                     os.unlink(temp_file_path)
@@ -195,6 +228,26 @@ class MedicalOCRProcessor:
                     pass
         
         return images
+    
+    def enhance_image_for_ocr(self, image):
+        """Enhance image for better OCR results"""
+        try:
+            # Convert to grayscale for better contrast
+            if image.mode != 'L':
+                image = image.convert('L')
+            
+            # Enhance contrast
+            from PIL import ImageEnhance
+            enhancer = ImageEnhance.Contrast(image)
+            image = enhancer.enhance(1.5)  # Increase contrast
+            
+            enhancer = ImageEnhance.Sharpness(image)
+            image = enhancer.enhance(1.2)  # Increase sharpness
+            
+        except Exception as e:
+            logger.warning(f"Image enhancement failed: {e}")
+        
+        return image
     
     def process_single_file(self, uploaded_file, api_key=None):
         """Process a single file and return results"""
@@ -204,7 +257,10 @@ class MedicalOCRProcessor:
             file_name = uploaded_file.name
             
             if file_type.startswith('image/'):
+                # Process image file
                 image = Image.open(io.BytesIO(file_bytes))
+                # Enhance image for better OCR
+                image = self.enhance_image_for_ocr(image)
                 ocr_text, method = self.extract_text_from_image(image, api_key)
                 
                 txt_file_path = self.ocr_output_folder / f"{Path(file_name).stem}.txt"
@@ -221,6 +277,7 @@ class MedicalOCRProcessor:
                 }
                 
             elif file_type == 'application/pdf':
+                # Process PDF file - convert to images first
                 pdf_images = self.pdf_to_images(file_bytes)
                 
                 if not pdf_images:
@@ -233,11 +290,17 @@ class MedicalOCRProcessor:
                 
                 pdf_ocr_text = ""
                 method_used = "Tesseract"  # Default
+                successful_pages = 0
                 
                 for page_num, image in enumerate(pdf_images, 1):
                     page_text, method = self.extract_text_from_image(image, api_key)
                     method_used = method  # Track which method was used
-                    pdf_ocr_text += f"--- Page {page_num} ---\n\n{page_text}\n\n"
+                    
+                    if page_text and len(page_text.strip()) > 10:  # Valid text check
+                        pdf_ocr_text += f"--- Page {page_num} ---\n\n{page_text}\n\n"
+                        successful_pages += 1
+                    else:
+                        pdf_ocr_text += f"--- Page {page_num} ---\n\n[OCR failed or no text detected]\n\n"
                 
                 pdf_ocr_text = self.clean_text(pdf_ocr_text)
                 
@@ -251,6 +314,7 @@ class MedicalOCRProcessor:
                     "ocr_text": pdf_ocr_text,
                     "text_length": len(pdf_ocr_text),
                     "page_count": len(pdf_images),
+                    "successful_pages": successful_pages,
                     "status": "Success",
                     "method": method_used
                 }
@@ -322,7 +386,15 @@ class MedicalOCRProcessor:
                         "messages": [
                             {
                                 "role": "system", 
-                                "content": """You are an experienced medical doctor and clinical analyst. Provide comprehensive, detailed medical analysis of the provided medical document."""
+                                "content": """You are an experienced medical doctor and clinical analyst. Provide comprehensive, detailed medical analysis of the provided medical document.
+
+CRITICAL INSTRUCTIONS:
+1. Analyze the ENTIRE document thoroughly
+2. Provide structured, organized analysis with clear sections
+3. Focus on medical accuracy and clinical relevance
+4. Include specific findings, interpretations, and recommendations
+5. Use professional medical terminology
+6. Be comprehensive but avoid unnecessary repetition"""
                             },
                             {"role": "user", "content": prompt}
                         ],
@@ -387,14 +459,45 @@ MEDICAL TEXT TO ANALYZE:
 REQUIRED ANALYSIS FORMAT:
 
 1. DOCUMENT OVERVIEW
-2. PATIENT DEMOGRAPHICS & HISTORY (if available)
-3. CLINICAL FINDINGS - DETAILED BREAKDOWN
-4. DIFFERENTIAL DIAGNOSIS
-5. RISK ASSESSMENT
-6. RECOMMENDATIONS & NEXT STEPS
-7. CLINICAL IMPRESSION & SUMMARY
+   - Type of document(s) (e.g., lab report, clinical notes, imaging report)
+   - Overall clinical context and purpose
+   - Date relevance and temporal considerations
 
-Please provide this analysis in a clear, structured format using medical terminology appropriate for healthcare professionals."""
+2. PATIENT DEMOGRAPHICS & HISTORY (if available)
+   - Age, gender, relevant background
+   - Medical history findings
+   - Current symptoms or complaints
+
+3. CLINICAL FINDINGS - DETAILED BREAKDOWN
+   For each major section (lab results, imaging, clinical notes):
+   - Normal/abnormal parameters with specific values
+   - Clinical significance of each finding
+   - Patterns and trends across multiple tests/measures
+   - Critical values requiring immediate attention
+
+4. DIFFERENTIAL DIAGNOSIS
+   - Potential conditions based on findings
+   - Most likely diagnoses with supporting evidence
+   - Ruled-out conditions with reasoning
+
+5. RISK ASSESSMENT
+   - Immediate health risks (urgent/emergent)
+   - Medium-term clinical concerns
+   - Long-term health implications
+
+6. RECOMMENDATIONS & NEXT STEPS
+   - Immediate actions required (if any)
+   - Specialist referrals needed
+   - Follow-up testing and timing
+   - Patient monitoring requirements
+   - Treatment considerations
+
+7. CLINICAL IMPRESSION & SUMMARY
+   - Overall assessment of patient status
+   - Key takeaways for healthcare providers
+   - Documentation quality assessment
+
+Please provide this analysis in a clear, structured format using medical terminology appropriate for healthcare professionals. Focus on actionable insights and clinical relevance."""
 
         result = self.send_to_api(prompt, api_key, progress_callback)
         
