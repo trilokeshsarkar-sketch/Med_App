@@ -10,9 +10,9 @@ import sys
 from PIL import Image
 import io
 import torch
-from transformers import TrOCRProcessor, VisionEncoderDecoderModel
 import fitz  # PyMuPDF for PDF handling
 import tempfile
+import base64
 
 # Download NLTK data for TextBlob if needed
 try:
@@ -54,7 +54,7 @@ def main():
     </style>
     """, unsafe_allow_html=True)
     
-    st.markdown('<h1 class="main-header">🏥 Medical OCR Analyzer (TrOCR)</h1>', unsafe_allow_html=True)
+    st.markdown('<h1 class="main-header">🏥 Medical OCR Analyzer (NVIDIA Nemotron)</h1>', unsafe_allow_html=True)
     
     # Initialize processor
     if 'processor' not in st.session_state:
@@ -76,13 +76,13 @@ def main():
         st.header("⚙️ OCR Settings")
         ocr_method = st.selectbox(
             "OCR Method",
-            ["TrOCR (Transformer OCR)", "Tesseract (if available)"],
-            help="TrOCR uses AI-based OCR, Tesseract uses traditional OCR"
+            ["NVIDIA Nemotron (AI Vision)", "Tesseract (Fallback)"],
+            help="NVIDIA Nemotron uses advanced AI for OCR, Tesseract is traditional fallback"
         )
         
         st.header("📋 Instructions")
         st.markdown("""
-        1. Select OCR method (TrOCR recommended)
+        1. Select OCR method (NVIDIA Nemotron recommended)
         2. Enter your OpenRouter API key
         3. Upload medical documents
         4. Click 'Process Documents'
@@ -121,7 +121,8 @@ def main():
             with st.spinner("Processing documents..."):
                 try:
                     # Set OCR method in processor
-                    processor.use_trocr = (ocr_method == "TrOCR (Transformer OCR)")
+                    processor.use_nemotron = (ocr_method == "NVIDIA Nemotron (AI Vision)")
+                    processor.openrouter_api_key = api_key  # Pass API key for OCR
                     
                     data, all_ocr_text, combined_text_path, processed_files = processor.process_uploaded_files(
                         uploaded_files, progress_callback=update_file_progress
