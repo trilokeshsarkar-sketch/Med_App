@@ -10,5 +10,7 @@ openai
 backoff
 tesseract
 transformers 
+torch
+
 
 
