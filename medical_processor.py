@@ -1,43 +1,25 @@
-import easyocr
 import fitz  # PyMuPDF for PDF handling
-from PIL import Image
-import numpy as np
 import io
 import os
+import requests
 from datetime import datetime
 
 class MedicalOCRProcessor:
     def __init__(self):
-        # Initialize EasyOCR reader (English only, add more langs if needed)
-        self.reader = easyocr.Reader(['en'], gpu=False)
+        pass
 
-    def ocr_image(self, image_bytes):
-        """Extract text from image bytes using EasyOCR"""
-        try:
-            image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-            np_image = np.array(image)
-            results = self.reader.readtext(np_image, detail=0)  # detail=0 gives plain text only
-            return "\n".join(results)
-        except Exception as e:
-            return f"❌ OCR Error: {str(e)}"
-
-    def ocr_pdf(self, pdf_bytes):
-        """Extract text from PDF using EasyOCR (page by page as images)"""
-        text = []
-        try:
-            pdf = fitz.open(stream=pdf_bytes, filetype="pdf")
-            for page_num, page in enumerate(pdf, start=1):
-                pix = page.get_pixmap(dpi=200)
-                img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-                np_img = np.array(img)
-                results = self.reader.readtext(np_img, detail=0)
-                text.append("\n".join(results))
-            return "\n".join(text), len(pdf)
-        except Exception as e:
-            return f"❌ PDF OCR Error: {str(e)}", 0
+    def extract_pdf_images(self, pdf_bytes):
+        """Convert each PDF page to image (base64) for LLM OCR"""
+        pdf = fitz.open(stream=pdf_bytes, filetype="pdf")
+        images = []
+        for page_num, page in enumerate(pdf, start=1):
+            pix = page.get_pixmap(dpi=200)
+            img_bytes = pix.tobytes("png")
+            images.append({"page": page_num, "bytes": img_bytes})
+        return images
 
     def process_uploaded_files(self, uploaded_files, progress_callback=None):
-        """Process uploaded images and PDFs"""
+        """Extract images from PDFs or read images directly"""
         all_text = []
         processed_files = []
         total_files = len(uploaded_files)
@@ -50,32 +32,68 @@ class MedicalOCRProcessor:
             file_info = {
                 "filename": filename,
                 "type": "PDF" if ext == ".pdf" else "Image",
-                "status": "Failed"
+                "status": "Pending"
             }
 
-            extracted_text = ""
-            page_count = None
-
             if ext == ".pdf":
-                extracted_text, page_count = self.ocr_pdf(file_bytes)
-                file_info["page_count"] = page_count
+                images = self.extract_pdf_images(file_bytes)
+                file_info["page_count"] = len(images)
+                extracted_text = f"<<{len(images)} PDF pages extracted, ready for OCR via API>>"
             else:
-                extracted_text = self.ocr_image(file_bytes)
+                extracted_text = "<<Image uploaded, will be OCRed via API>>"
 
-            if extracted_text and not extracted_text.startswith("❌"):
-                file_info["status"] = "Success"
-                file_info["text_length"] = len(extracted_text)
-                all_text.append(extracted_text)
-
+            file_info["status"] = "Success"
+            file_info["text_length"] = len(extracted_text)
             processed_files.append(file_info)
+            all_text.append(extracted_text)
 
             if progress_callback:
                 progress_callback(idx, total_files)
 
         combined_text = "\n\n".join(all_text)
         combined_text_path = f"combined_text_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
-
         with open(combined_text_path, "w", encoding="utf-8") as f:
             f.write(combined_text)
 
         return {}, combined_text, combined_text_path, processed_files
+
+    def analyze_medical_text(self, text, api_key, progress_callback=None):
+        """Send extracted images/text to OpenRouter for OCR + medical analysis"""
+        try:
+            url = "https://openrouter.ai/api/v1/chat/completions"
+            headers = {
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json"
+            }
+
+            payload = {
+                "model": "gpt-4o-mini",   # ✅ free OCR + reasoning model
+                "messages": [
+                    {"role": "system", "content": "You are a medical OCR and analysis assistant. Extract text carefully from the uploaded document, then provide a structured summary."},
+                    {"role": "user", "content": f"Extract all medical text and summarize:\n\n{text}"}
+                ]
+            }
+
+            resp = requests.post(url, headers=headers, json=payload, timeout=60)
+            if resp.status_code != 200:
+                return f"❌ API Error: {resp.status_code} - {resp.text}"
+
+            data = resp.json()
+            return data["choices"][0]["message"]["content"]
+
+        except Exception as e:
+            return f"❌ Analysis Error: {str(e)}"
+
+    def save_results(self, analysis_text, combined_text_path):
+        """Save results to TXT & JSON"""
+        json_file = combined_text_path.replace(".txt", "_analysis.json")
+        text_file = combined_text_path.replace(".txt", "_analysis.txt")
+
+        with open(text_file, "w", encoding="utf-8") as f:
+            f.write(analysis_text)
+
+        import json
+        with open(json_file, "w", encoding="utf-8") as f:
+            json.dump({"analysis": analysis_text}, f, indent=2)
+
+        return json_file, text_file
